@@ -1,0 +1,9 @@
+ipc,l1d_mpki,l2_mpki,llc_mpki,trace,policy,file
+0.813829,66.0504,66.0504,66.0504,1,exclusive,outputs_latest/exclusive_no/trace1.txt
+0.529026,66.0504,66.0504,66.0504,1,noninclusive,outputs/no_prefetcher/trace1.txt
+0.739651,78.0221,78.0221,78.0221,2,exclusive,outputs_latest/exclusive_no/trace2.txt
+0.462268,78.0222,78.0222,78.0222,2,noninclusive,outputs/no_prefetcher/trace2.txt
+1.08515,35.7546,35.7546,35.7546,3,exclusive,outputs_latest/exclusive_no/trace3.txt
+0.834309,35.7547,35.7547,35.7547,3,noninclusive,outputs/no_prefetcher/trace3.txt
+0.739998,77.7244,77.7244,77.7244,4,exclusive,outputs_latest/exclusive_no/trace4.txt
+0.462276,77.7236,77.7236,77.7236,4,noninclusive,outputs/no_prefetcher/trace4.txt

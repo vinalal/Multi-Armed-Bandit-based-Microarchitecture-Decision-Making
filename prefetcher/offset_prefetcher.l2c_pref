@@ -1,0 +1,221 @@
+#include "cache.h"
+
+#define OFFSETS_NUMBER 5
+
+#define TABLE_SIZE 128
+#define SCORE_THRESHOLD 4
+#define LOW_PREFETCH_DEGREE 3
+#define HIGH_PREFETCH_DEGREE 8
+
+
+struct OffsetInfo
+{
+	int16_t offset;
+	uint64_t frequency;
+	uint64_t score;
+};
+
+
+class TableEntry
+{
+public:
+	uint64_t page_number;
+	uint64_t last_addr;
+	OffsetInfo offsets[OFFSETS_NUMBER];
+	uint16_t lru;
+
+	TableEntry()
+	{
+		page_number = 0;
+		last_addr = 0;
+		for (int i = 0; i < OFFSETS_NUMBER; ++i)
+		{
+			offsets[i] = OffsetInfo();
+		}
+		lru = 0;
+	}
+};
+
+TableEntry table[TABLE_SIZE];
+
+
+void CACHE::l2c_prefetcher_initialize() 
+{
+    cout << "CPU " << cpu << " Region based L2 offset prefetcher" << endl;
+	for (int i = 0; i < TABLE_SIZE; ++i)
+	{
+		table[i].lru = i;
+	}
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in, uint8_t critical_ip_flag)
+{
+	uint64_t cl_addr = addr >> LOG2_BLOCK_SIZE;
+	uint64_t page_num = addr >> LOG2_PAGE_SIZE;
+	int index = -1;
+
+	uint32_t off = metadata_in >> 8;
+	int16_t offset_used = static_cast<int16_t>(off) - 4096;
+	uint8_t is_prefetch_hit = static_cast<uint8_t>(metadata_in & 0xFF);
+
+	for (index = 0; index < TABLE_SIZE; ++index)
+	{
+		if (table[index].page_number == page_num) break;
+	}
+
+	// page number not found in the table
+	if (index == TABLE_SIZE)
+	{
+		// Evict lru block i.e. the one which has lru = TABLE_SIZE - 1
+		for (index = 0; index < TABLE_SIZE; ++index)
+		{
+			if (table[index].lru == (TABLE_SIZE - 1)) break;
+		}
+
+		table[index].page_number = page_num;
+		table[index].last_addr = cl_addr;
+		for (int i = 0; i < OFFSETS_NUMBER; ++i)
+		{
+			table[index].offsets[i] = OffsetInfo();
+		}
+		for (int i=0; i < TABLE_SIZE; ++i)
+		{
+            if (table[i].lru < table[index].lru)
+                ++table[i].lru;
+        }
+
+		// Making this page most recently used
+		table[index].lru = 0;
+
+		return metadata_in;
+	}
+
+	// This Page was already present in the table
+	TableEntry& myTableEntry = table[index];
+	// Lets see whats the new offset now
+	int offset = 0;
+	if (cl_addr > myTableEntry.last_addr)
+	{
+		offset = cl_addr - myTableEntry.last_addr;
+	}
+	else
+	{
+		offset = myTableEntry.last_addr - cl_addr;
+		offset *= -1;
+	}
+
+	// If offset is 0 i.e. same address is getting access again and again toh
+	// prefetch n all kyu kare so just return
+	if (offset == 0) return metadata_in;
+
+	// ab pehle dekhte hai ki ye offset wo OFFSETS_NUMBER offsets me hai kya
+	int offset_index = 0;
+	for (; offset_index < OFFSETS_NUMBER; ++offset_index)
+	{
+		if (myTableEntry.offsets[offset_index].offset == offset) break;
+	}
+
+	// agar completely naya offset hai
+	if (offset_index == OFFSETS_NUMBER)
+	{
+		// least frequency wale offset ko hatao
+		uint64_t min_frequency = UINT64_MAX;
+		int min_freq_offset_index = -1;
+		for (int i = 0; i < OFFSETS_NUMBER; ++i)
+		{
+			if (myTableEntry.offsets[i].frequency < min_frequency)
+			{
+				min_frequency = myTableEntry.offsets[i].frequency;
+				min_freq_offset_index = i;
+			}
+		}
+
+		assert(min_freq_offset_index >= 0);
+
+		OffsetInfo new_offset_info = OffsetInfo{offset, 1, 0};
+		myTableEntry.offsets[min_freq_offset_index] = new_offset_info;
+
+	}
+	else
+	{
+		myTableEntry.offsets[offset_index].frequency += 1;
+	}
+
+	// Update the score if it was a prefetch request and cache hit
+	// TODO : CHeck if this condition is correct
+	if (cache_hit && type != PREFETCH && (is_prefetch_hit & 1))
+	{
+		// cout << "YOOO Score Update" << endl;
+		// cout << "Offset used : " << offset_used << endl;
+		int index = -1;
+		for (int i = 0; i < OFFSETS_NUMBER; ++i)
+		{
+			if (myTableEntry.offsets[i].offset == offset_used)
+			{
+				index = i;
+				break;
+			}
+		}
+
+		if (index != -1 && myTableEntry.offsets[index].score < UINT64_MAX)
+        {
+			myTableEntry.offsets[index].score += 1;
+			// cout << "index found for score update : " << index << " Now updated score : " << myTableEntry.offsets[index].score << endl;
+        }
+	}
+
+	// Prefetch according to the policy
+	// Take highest frequency offset
+	// If score high enough then degree = HIGH_PREFETCH_DEGREE else degree = LOW_PREFETCH_DEGREE
+
+	int max_scoreplusfreq_index = -1;
+	uint64_t max_scoreplusfreq = 0;
+	for (int i = 0; i < OFFSETS_NUMBER; ++i)
+	{
+		if(myTableEntry.offsets[i].frequency + 2*myTableEntry.offsets[i].score > max_scoreplusfreq){
+			max_scoreplusfreq = myTableEntry.offsets[i].frequency + 2*myTableEntry.offsets[i].score;
+			max_scoreplusfreq_index = i;
+		}
+	}
+	assert(max_scoreplusfreq_index >= 0);
+
+	int16_t best_offset = myTableEntry.offsets[max_scoreplusfreq_index].offset;
+	int prefetch_degree = LOW_PREFETCH_DEGREE;
+	if (myTableEntry.offsets[max_scoreplusfreq_index].score > SCORE_THRESHOLD){
+		prefetch_degree = HIGH_PREFETCH_DEGREE;
+	}
+	for (int i = 0; i < prefetch_degree; ++i)
+	{
+		uint64_t pf_address = (cl_addr + (best_offset*(i+1))) << LOG2_BLOCK_SIZE;
+		// only issue a prefetch if the prefetch address is in the same 4 KB page 
+		// as the current demand access address
+		if ((pf_address >> LOG2_PAGE_SIZE) != (addr >> LOG2_PAGE_SIZE))
+			break;
+		// cout << "Prefetching now and sending offset as " << best_offset << endl;
+    	if (MSHR.occupancy < (MSHR.SIZE>>1))
+	      prefetch_line(ip, addr, pf_address, FILL_L2, static_cast<uint32_t>(best_offset + 4096));
+        else
+	      prefetch_line(ip, addr, pf_address, FILL_LLC, static_cast<uint32_t>(best_offset + 4096));
+
+	}
+
+	myTableEntry.last_addr = cl_addr;
+	for (int i=0; i<TABLE_SIZE; i++) {
+        if (table[i].lru < table[index].lru)
+            table[i].lru++;
+    }
+    table[index].lru = 0;
+
+    return metadata_in;
+
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t match, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in)
+{
+	return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats()
+{
+  cout << "CPU " << cpu << " L2C Region based offset prefetcher final stats" << endl;
+}
